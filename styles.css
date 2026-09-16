@@ -539,6 +539,24 @@ button:active {
   font-size: 0.88rem;
 }
 
+.save-banner {
+  margin: 0 0 1rem;
+  padding: 0.75rem 0.95rem;
+  border-radius: 12px;
+  background: var(--good-soft);
+  border: 1px solid #b7d7ce;
+  color: var(--teal);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.save-banner.quiet {
+  background: var(--paper);
+  border-color: var(--line);
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
 .footer-note {
   margin-top: 1.5rem;
   color: var(--muted);

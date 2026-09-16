@@ -31,16 +31,40 @@
     };
   }
 
+  function hasSavedProgress() {
+    return (
+      (state.currentGroup && state.currentGroup.length > 0) ||
+      state.groupsCompleted > 0 ||
+      (state.introduced && state.introduced.length > 0) ||
+      state.screen === "cycle-done" ||
+      state.screen === "group-done" ||
+      state.screen === "drill" ||
+      state.screen === "group-intro"
+    );
+  }
+
   function loadState() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      // Migrate / sanitize
       if (!parsed.elementStats) parsed.elementStats = {};
       if (!parsed.introduced) parsed.introduced = [];
       if (!parsed.currentGroup) parsed.currentGroup = [];
       if (!parsed.phase) parsed.phase = "intro";
+      if (!parsed.mastery) parsed.mastery = {};
+      // Rehydrate element objects on the current question if present
+      if (parsed.current && parsed.current.el && parsed.current.el.symbol) {
+        const live = STARRED_ELEMENTS.find((e) => e.symbol === parsed.current.el.symbol);
+        if (live) {
+          parsed.current.el = {
+            ...live,
+            isNew: Boolean(parsed.current.el.isNew),
+          };
+        }
+      }
+      parsed.feedback = null;
+      parsed.lockedChoices = false;
       return parsed;
     } catch {
       return null;
@@ -48,9 +72,24 @@
   }
 
   function saveState() {
-    const toSave = { ...state, current: null, feedback: null, lockedChoices: false };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    try {
+      const toSave = {
+        ...state,
+        feedback: null,
+        lockedChoices: false,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    } catch {
+      // Quota / private mode — ignore; session still works in memory
+    }
   }
+
+  // Persist on tab close / refresh / background
+  window.addEventListener("pagehide", saveState);
+  window.addEventListener("beforeunload", saveState);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveState();
+  });
 
   function shuffle(arr) {
     const a = [...arr];
@@ -433,6 +472,7 @@
     const sizes = [4, 5, 6, 8, 10, 12, 16];
     const reviewN = reviewSlotCount(state.groupSize);
     const newN = state.groupSize - reviewN;
+    const saved = hasSavedProgress();
     app.innerHTML = `
       <section class="screen">
         <p class="eyebrow">Day 13 prep · ${STARRED_ELEMENTS.length} starred elements</p>
@@ -440,6 +480,12 @@
         <p class="lede">
           Learn in packs. Each new pack keeps ~${Math.round(REVIEW_RATIO * 100)}% old/weak elements mixed in, so earlier ones don’t fade.
         </p>
+
+        ${
+          saved
+            ? `<p class="save-banner">Progress saved on this device — refresh anytime and you’ll pick up where you left off. No account needed.</p>`
+            : `<p class="save-banner quiet">Progress auto-saves in this browser (no login). Refresh won’t wipe it.</p>`
+        }
 
         <div class="panel">
           <h2 style="font-size:1.45rem;margin-bottom:0.35rem">Group size</h2>
@@ -468,11 +514,13 @@
           </p>
 
           <div class="btn-row">
-            <button type="button" class="btn-primary" id="start-btn">Start drilling</button>
             ${
-              state.currentGroup.length || state.groupsCompleted
-                ? `<button type="button" class="btn-secondary" id="resume-btn">Resume</button>`
-                : ""
+              saved
+                ? `
+              <button type="button" class="btn-primary" id="resume-btn">Continue</button>
+              <button type="button" class="btn-secondary" id="start-btn">Start over</button>
+            `
+                : `<button type="button" class="btn-primary" id="start-btn">Start drilling</button>`
             }
           </div>
         </div>
@@ -500,6 +548,10 @@
               <strong>Finish with writing-only reviews</strong>
               <span>Once every element has been introduced, packs are pure review — weakest and rustiest first.</span>
             </li>
+            <li>
+              <strong>Progress saves automatically</strong>
+              <span>Stored on this device/browser only — no login. Closing the tab or refreshing keeps your place.</span>
+            </li>
           </ol>
           <p class="how-rules">
             Symbols are case-sensitive (<strong>Ca</strong>, not ca). Names need correct spelling; capitalization doesn’t matter.
@@ -523,28 +575,59 @@
     const custom = app.querySelector("#custom-size");
     custom.addEventListener("change", () => applySize(custom.value));
 
-    app.querySelector("#start-btn").addEventListener("click", () => {
-      applySize(custom.value, { rerender: false });
-      startSession();
-      render();
-    });
+    const startBtn = app.querySelector("#start-btn");
+    if (startBtn) {
+      startBtn.addEventListener("click", () => {
+        applySize(custom.value, { rerender: false });
+        startSession();
+        render();
+      });
+    }
 
     const resume = app.querySelector("#resume-btn");
     if (resume) {
       resume.addEventListener("click", () => {
-        if (!state.currentGroup.length) {
-          if (state.phase === "review" || state.introduced.length === STARRED_ELEMENTS.length) {
-            startReviewRound();
-          } else {
-            startSession();
-          }
-        } else {
-          state.screen = "group-intro";
-        }
-        saveState();
+        resumeSession();
         render();
       });
     }
+  }
+
+  function resumeSession() {
+    if (state.screen === "drill" && state.current) {
+      saveState();
+      return;
+    }
+    if (state.screen === "drill" && state.currentGroup.length) {
+      // Mid-pack but question missing — keep mastery, continue drilling
+      beginDrill();
+      return;
+    }
+    if (state.screen === "group-intro" && state.currentGroup.length) {
+      saveState();
+      return;
+    }
+    if (state.screen === "group-done" || state.screen === "cycle-done") {
+      saveState();
+      return;
+    }
+    if (state.currentGroup.length) {
+      state.screen = "group-intro";
+      saveState();
+      return;
+    }
+    if (state.phase === "review" || state.introduced.length === STARRED_ELEMENTS.length) {
+      state.screen = "cycle-done";
+      saveState();
+      return;
+    }
+    if (state.introduced.length) {
+      // Had progress but no current pack — build next
+      const group = buildNextGroup();
+      startGroup(group);
+      return;
+    }
+    startSession();
   }
 
   function renderGroupIntro() {
@@ -866,10 +949,21 @@
     });
   }
 
-  // Boot
-  if (state.screen === "drill" && !state.current) {
-    state.screen = state.currentGroup.length ? "group-intro" : "setup";
+  // Boot — restore mid-session instead of dumping to setup
+  if (state.screen === "drill" && !state.current && state.currentGroup.length) {
+    // Keep pack mastery; pick up with next question
+    state.current = pickNextQuestion();
+    if (!state.current) state.screen = "group-done";
+  } else if (state.screen === "drill" && !state.current) {
+    state.screen = hasSavedProgress() ? "cycle-done" : "setup";
   }
-  // Clear stale v1 so resume doesn’t get confused if both exist — v2 is separate key
+
+  // If they closed on setup but have an in-progress pack, stay on setup
+  // (Continue is the primary button). Otherwise jump straight back in.
+  if (state.screen !== "setup" && !["group-intro", "drill", "group-done", "cycle-done"].includes(state.screen)) {
+    state.screen = "setup";
+  }
+
+  saveState();
   render();
 })();
